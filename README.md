@@ -1,6 +1,6 @@
 # Text File Manager
 
-A secure Python library for managing sensitive data using encrypted sharding with Shamir's Secret Sharing.
+A secure Python library for managing sensitive data using encrypted sharding with Shamir's Secret Sharing. Supports local storage, cloud storage (AWS S3), and hybrid configurations for maximum security and redundancy.
 
 ## Overview
 
@@ -8,236 +8,328 @@ Text File Manager provides a defense-in-depth approach to storing sensitive data
 
 1. **Data Sharding**: Splits data using Shamir's Secret Sharing (K-of-N threshold scheme)
 2. **Encryption**: Each shard is encrypted with ChaCha20-Poly1305 authenticated encryption
-3. **Physical Separation**: Shards are stored across multiple directories (ideally on separate drives)
+3. **Distribution**: Shards can be stored locally, in AWS S3, or across multiple locations
 
-Even if an attacker gains access to some shards, they cannot reconstruct the original data without reaching the threshold.
+## Storage Modes
+
+### 1. Local Mode (100% Local)
+
+All shards stored on the local filesystem across multiple directories (ideally on separate drives).
+
+```python
+from src import SecureShardingClient
+
+client = SecureShardingClient.create_local(
+    directories=['/secure/drive1', '/secure/drive2', '/secure/drive3'],
+    threshold=2,  # Need 2 of 3 shards to reconstruct
+)
+```
+
+**Use case**: Single-machine security, air-gapped systems, local development.
+
+### 2. Cloud Mode (100% Cloud)
+
+All shards stored in AWS S3, distributed across 2 separate AWS accounts for cross-account redundancy.
+
+```python
+from src import SecureShardingClient
+
+client = SecureShardingClient.create_cloud(
+    aws_account1_config={
+        'bucket': 'shards-account1',
+        'region': 'us-east-1',
+        'profile_name': 'account1-profile',  # or use role_arn
+    },
+    aws_account2_config={
+        'bucket': 'shards-account2',
+        'region': 'us-west-2',
+        'profile_name': 'account2-profile',
+    },
+    threshold=3,
+    account1_shards=3,
+    account2_shards=2,
+)
+```
+
+**Use case**: Cloud-native applications, serverless architectures, multi-region redundancy.
+
+### 3. Hybrid Mode (50% Local + 50% Cloud)
+
+Shards distributed between local storage and 2 AWS accounts. This mode is designed with specific security properties:
+
+- **Local alone cannot reconstruct**: Prevents recovery if only local storage is accessed
+- **Single AWS account alone cannot reconstruct**: Prevents recovery if one cloud account is compromised
+- **Local + any one AWS account CAN reconstruct**: Allows recovery with partial access
+- **Both AWS accounts CAN reconstruct**: Allows recovery even if local storage is lost
+
+```python
+from src import SecureShardingClient
+
+client = SecureShardingClient.create_hybrid(
+    local_directories=['/secure/drive1', '/secure/drive2'],
+    aws_account1_config={
+        'bucket': 'shards-account1',
+        'region': 'us-east-1',
+    },
+    aws_account2_config={
+        'bucket': 'shards-account2',
+        'region': 'us-west-2',
+    },
+    local_shards=2,
+    account1_shards=2,
+    account2_shards=2,
+)
+# Default distribution: 6 shards, threshold 3
+# - 2 local shards
+# - 2 AWS account 1 shards
+# - 2 AWS account 2 shards
+# Recovery requires: local + AWS1, OR local + AWS2, OR AWS1 + AWS2
+```
+
+**Use case**: High-security applications, compliance requirements, disaster recovery.
 
 ## Features
 
-- **Shamir's Secret Sharing**: Configure any K-of-N threshold (e.g., 3-of-5 means any 3 shards can reconstruct data)
-- **ChaCha20-Poly1305**: Modern authenticated encryption providing confidentiality and integrity
-- **PBKDF2-HMAC-SHA256**: Password-based key derivation with 600,000 iterations (OWASP 2023 recommendation)
+- **Shamir's Secret Sharing**: Configure any K-of-N threshold
+- **ChaCha20-Poly1305**: Modern authenticated encryption (AEAD)
+- **PBKDF2-HMAC-SHA256**: 600,000 iterations (OWASP 2023 recommendation)
+- **Cross-Account Storage**: Distribute across multiple AWS accounts
 - **Unique Cryptographic Material**: Each shard uses unique salt and nonce
 - **Integrity Verification**: SHA-256 hash verification on reconstruction
-- **Secure Deletion**: Optional secure file deletion with random data overwriting
-- **Restrictive Permissions**: Files created with 0o600, directories with 0o700
+- **Secure Deletion**: Random data overwriting before file deletion
+- **Restrictive Permissions**: Files (0o600), directories (0o700)
 
 ## Installation
 
-### Using pip
+### Basic (Local Storage Only)
 
 ```bash
 pip install cryptography sslib python-dotenv
 ```
 
-### Using uv
+### With AWS Support
 
 ```bash
-uv pip install cryptography sslib python-dotenv
+pip install cryptography sslib python-dotenv boto3
 ```
 
 ### Development Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/example/text-file-manager.git
 cd text-file-manager
-
-# Install with development dependencies
-pip install -e ".[dev]"
+pip install -e ".[all]"  # Includes AWS and dev dependencies
 ```
 
 ## Quick Start
 
+### Store and Retrieve Data
+
 ```python
-from src import SecureLocalShardingClient
+from src import SecureShardingClient
 
-# Configure shard directories (ideally on separate drives)
-directories = [
-    '/secure/drive1/shards',
-    '/secure/drive2/shards',
-    '/secure/drive3/shards',
-]
-
-# Initialize the client
-client = SecureLocalShardingClient(directories)
-
-# Store sensitive data (requires password of 12+ characters)
-result = client.store_sharded(
-    key='secrets/api-key',
-    data=b'my-super-secret-api-key',
-    password='my-secure-password-here',
-    threshold=2,  # Need 2 shards to reconstruct
-    total_shares=3,  # Create 3 shards total
+# Create client (local mode for this example)
+client = SecureShardingClient.create_local(
+    directories=['/tmp/shards/d1', '/tmp/shards/d2', '/tmp/shards/d3'],
+    threshold=2,
 )
 
-# Retrieve and reconstruct data
-data = client.retrieve_sharded(
+# Store sensitive data
+result = client.store(
+    key='secrets/api-key',
+    data=b'my-super-secret-api-key',
+    password='my-secure-password-here',  # Min 12 characters
+)
+print(f"Stored {len(result.stored_shards)} shards")
+
+# Retrieve data
+data = client.retrieve(
     key='secrets/api-key',
     password='my-secure-password-here',
 )
 print(data.decode('utf-8'))  # 'my-super-secret-api-key'
+
+# Check shard status
+status = client.get_shard_status('secrets/api-key')
+print(f"Can reconstruct: {status['can_reconstruct']}")
+
+# Delete when done
+client.delete('secrets/api-key', secure=True)
+```
+
+### Hybrid Mode Example
+
+```python
+from src import SecureShardingClient
+
+# Configure hybrid storage
+client = SecureShardingClient.create_hybrid(
+    local_directories=['/secure/local1', '/secure/local2'],
+    aws_account1_config={
+        'bucket': 'company-shards-primary',
+        'region': 'us-east-1',
+        'profile_name': 'primary-account',
+    },
+    aws_account2_config={
+        'bucket': 'company-shards-backup',
+        'region': 'eu-west-1',
+        'profile_name': 'backup-account',
+    },
+)
+
+# Store with automatic distribution
+result = client.store(
+    key='secrets/database-credentials',
+    data=b'{"host": "...", "password": "..."}',
+    password='ultra-secure-password',
+    metadata={'environment': 'production'},
+)
+
+# Check distribution
+print(f"Storage mode: {result.storage_mode.value}")
+print(f"Threshold: {result.threshold}/{result.total_shares}")
+print(f"Local shards: {result.distribution.local_shards}")
+print(f"Cloud shards: {result.distribution.cloud_account1_shards + result.distribution.cloud_account2_shards}")
 ```
 
 ## API Reference
 
-### SecureLocalShardingClient
+### SecureShardingClient
 
-The main class for storing and retrieving encrypted sharded data.
+The main class for multi-backend sharding operations.
 
-#### Constructor
+#### Factory Methods
 
 ```python
-SecureLocalShardingClient(shard_directories: list[str])
+# 100% Local storage
+SecureShardingClient.create_local(
+    directories: list[str],
+    threshold: int = 3,
+) -> SecureShardingClient
+
+# 100% Cloud storage (2 AWS accounts)
+SecureShardingClient.create_cloud(
+    aws_account1_config: dict,
+    aws_account2_config: dict,
+    threshold: int = 3,
+    account1_shards: int = 3,
+    account2_shards: int = 2,
+) -> SecureShardingClient
+
+# Hybrid local + cloud storage
+SecureShardingClient.create_hybrid(
+    local_directories: list[str],
+    aws_account1_config: dict,
+    aws_account2_config: dict,
+    local_shards: int | None = None,
+    account1_shards: int | None = None,
+    account2_shards: int | None = None,
+) -> SecureShardingClient
 ```
 
-**Parameters:**
-- `shard_directories`: List of directory paths where shards will be stored
+#### AWS Config Options
 
-**Raises:**
-- `ValueError`: If no directories are provided
-- `DirectoryError`: If a directory cannot be created
+```python
+aws_config = {
+    'bucket': str,           # Required: S3 bucket name
+    'region': str,           # Required: AWS region
+    'profile_name': str,     # Optional: AWS CLI profile
+    'role_arn': str,         # Optional: IAM role for cross-account
+    'prefix': str,           # Optional: S3 key prefix (default: 'shards/')
+    'endpoint_url': str,     # Optional: Custom endpoint (for LocalStack)
+}
+```
 
 #### Methods
 
-##### store_sharded
-
 ```python
-store_sharded(
-    key: str,
-    data: bytes,
-    password: str,
-    threshold: int = 3,
-    total_shares: int | None = None,
-    metadata: dict[str, str] | None = None,
-) -> ShardResult
+# Store data
+store(key: str, data: bytes, password: str, metadata: dict | None = None) -> ShardResult
+
+# Retrieve data
+retrieve(key: str, password: str, verify_integrity: bool = True) -> bytes
+
+# Delete data
+delete(key: str, secure: bool = True) -> DeletionResult
+
+# List all keys
+list_keys() -> list[str]
+
+# Get shard status
+get_shard_status(key: str) -> dict
 ```
 
-Split data into encrypted shards and store across directories.
+### Storage Backends
 
-**Parameters:**
-- `key`: Unique identifier for the sharded data
-- `data`: Raw bytes to shard and store
-- `password`: Encryption password (minimum 12 characters)
-- `threshold`: Minimum shards needed to reconstruct (default: 3)
-- `total_shares`: Total shards to create (default: number of directories)
-- `metadata`: Optional metadata stored with shards (unencrypted)
-
-**Returns:** `ShardResult` with storage details
-
-**Raises:**
-- `TypeError`: If data is not bytes
-- `PasswordTooShortError`: If password < 12 characters
-- `ThresholdError`: If threshold > total_shares
-- `InsufficientShardsError`: If not enough shards could be stored
-
-##### retrieve_sharded
+For advanced use cases, you can use backends directly:
 
 ```python
-retrieve_sharded(
-    key: str,
-    password: str,
-    threshold: int | None = None,
-    required_shards: list[int] | None = None,
-    verify_integrity: bool = True,
-) -> bytes
+from src import LocalStorageBackend, S3StorageBackend
+
+# Local backend
+local = LocalStorageBackend('/path/to/shards')
+
+# S3 backend
+s3 = S3StorageBackend(
+    bucket_name='my-bucket',
+    region='us-east-1',
+    prefix='shards/',
+)
 ```
-
-Retrieve and reconstruct data from encrypted shards.
-
-**Parameters:**
-- `key`: Original file key
-- `password`: Decryption password
-- `threshold`: Expected threshold (auto-detected if None)
-- `required_shards`: Specific shard indices to retrieve
-- `verify_integrity`: Whether to verify SHA-256 hash (default: True)
-
-**Returns:** Reconstructed original data as bytes
-
-**Raises:**
-- `DecryptionError`: If decryption fails (wrong password)
-- `InsufficientShardsError`: If not enough shards available
-- `IntegrityError`: If integrity verification fails
-
-##### delete_sharded
-
-```python
-delete_sharded(key: str, secure_delete: bool = True) -> DeletionResult
-```
-
-Delete all shards for a given key.
-
-**Parameters:**
-- `key`: File key to delete
-- `secure_delete`: Overwrite with random data before deletion (default: True)
-
-**Returns:** `DeletionResult` with deletion details
-
-##### list_sharded_files
-
-```python
-list_sharded_files() -> list[str]
-```
-
-List all sharded file keys across directories.
-
-**Returns:** Sorted list of unique keys
 
 ### Exception Classes
 
 | Exception | Description |
 |-----------|-------------|
-| `ShardManagerError` | Base exception for all shard manager errors |
-| `PasswordError` | Password validation failed |
-| `PasswordTooShortError` | Password below minimum length |
+| `ShardManagerError` | Base exception for all errors |
+| `PasswordTooShortError` | Password below 12 characters |
 | `DecryptionError` | Shard decryption failed |
-| `IntegrityError` | Data integrity verification failed |
+| `IntegrityError` | Data integrity check failed |
 | `InsufficientShardsError` | Not enough shards for reconstruction |
 | `ThresholdError` | Invalid threshold configuration |
-| `DirectoryError` | Issues with shard directories |
-
-## Configuration
-
-### Environment Variables
-
-Configure shard directories via environment variables:
-
-```bash
-export SHARD_DIR_1=/path/to/shard1
-export SHARD_DIR_2=/path/to/shard2
-export SHARD_DIR_3=/path/to/shard3
-```
-
-Or use a `.env` file:
-
-```env
-SHARD_DIR_1=/secure/drive1/shards
-SHARD_DIR_2=/secure/drive2/shards
-SHARD_DIR_3=/secure/drive3/shards
-```
+| `DirectoryError` | Local directory issues |
+| `StorageError` | Backend storage operation failed |
+| `ConfigurationError` | Invalid storage mode configuration |
 
 ## Security Considerations
+
+### Hybrid Mode Security Properties
+
+The hybrid mode (default: 6 shards, threshold 4) ensures:
+
+| Scenario | Can Reconstruct? |
+|----------|------------------|
+| Local only (2 shards) | No |
+| AWS Account 1 only (2 shards) | No |
+| AWS Account 2 only (2 shards) | No |
+| Local + AWS Account 1 (4 shards) | Yes |
+| Local + AWS Account 2 (4 shards) | Yes |
+| AWS Account 1 + AWS Account 2 (4 shards) | Yes |
+| All three (6 shards) | Yes |
 
 ### Best Practices
 
 1. **Use Strong Passwords**: Minimum 12 characters, prefer passphrases
-2. **Separate Storage**: Store shards on physically separate drives or locations
-3. **Backup Shards**: Maintain backups, but keep them separated
-4. **Monitor Access**: Log and monitor access to shard directories
-5. **Secure Deletion**: Use `secure_delete=True` when removing sensitive data
+2. **Separate AWS Accounts**: Use different AWS accounts, not just different buckets
+3. **Enable S3 Versioning**: Protect against accidental deletion
+4. **Use IAM Roles**: Prefer role assumption over long-lived credentials
+5. **Physical Separation**: For local mode, use different physical drives
+6. **Regular Backups**: Maintain independent backups of shard locations
+7. **Monitor Access**: Enable CloudTrail for S3 access logging
 
 ### Threat Model
 
-This library protects against:
-- **Data theft**: Encrypted shards are useless without the password
-- **Partial compromise**: Attackers need K shards to reconstruct data
-- **Brute force**: PBKDF2 with 600K iterations makes password cracking expensive
-- **Tampering**: ChaCha20-Poly1305 detects any modifications
+**Protects against:**
+- Data theft from single storage location
+- Compromise of single AWS account
+- Brute force attacks (600K PBKDF2 iterations)
+- Data tampering (ChaCha20-Poly1305 authentication)
 
-This library does NOT protect against:
-- **Compromised passwords**: Use strong, unique passwords
-- **Memory attacks**: Secrets exist in memory during processing
-- **Compromised threshold**: If attacker gets K+ shards AND password
+**Does NOT protect against:**
+- Compromised passwords
+- Compromise of threshold+ storage locations
+- Memory-based attacks during processing
+- Quantum computing attacks (future consideration)
 
 ### Cryptographic Details
 
@@ -248,6 +340,44 @@ This library does NOT protect against:
 | Integrity | SHA-256 | Pre-encryption hash |
 | Secret Sharing | Shamir's SSS | Configurable K-of-N |
 | Random Generation | `secrets` module | Cryptographically secure |
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# Local shard directories
+export SHARD_DIR_1=/path/to/shard1
+export SHARD_DIR_2=/path/to/shard2
+
+# AWS configuration (or use AWS CLI profiles)
+export AWS_PROFILE_ACCOUNT1=primary-account
+export AWS_PROFILE_ACCOUNT2=backup-account
+```
+
+### AWS IAM Policy (Minimum Required)
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject",
+                "s3:ListBucket",
+                "s3:HeadObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::your-shard-bucket",
+                "arn:aws:s3:::your-shard-bucket/*"
+            ]
+        }
+    ]
+}
+```
 
 ## Development
 
@@ -268,6 +398,17 @@ mypy src/
 ```bash
 ruff check src/
 ruff format src/
+```
+
+## Legacy API
+
+The original `SecureLocalShardingClient` is still available for backwards compatibility:
+
+```python
+from src import SecureLocalShardingClient
+
+client = SecureLocalShardingClient(['/path/shard1', '/path/shard2', '/path/shard3'])
+client.store_sharded('key', b'data', 'password')
 ```
 
 ## License

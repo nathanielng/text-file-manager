@@ -83,3 +83,29 @@ class DirectoryError(ShardManagerError):
         full_message = f"{message}: {directory}" if directory else message
         super().__init__(full_message)
         self.directory = directory
+
+
+class StorageError(ShardManagerError):
+    """Raised when a storage backend operation fails."""
+
+    def __init__(
+        self,
+        message: str,
+        backend: str | None = None,
+        location: str | None = None,
+    ) -> None:
+        parts = [message]
+        if backend:
+            parts.append(f"backend={backend}")
+        if location:
+            parts.append(f"location={location}")
+        super().__init__(" ".join(parts))
+        self.backend = backend
+        self.location = location
+
+
+class ConfigurationError(ShardManagerError):
+    """Raised when storage mode configuration is invalid."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)

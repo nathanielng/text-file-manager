@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "text-file-manager"
-version = "0.1.0"
-description = "Secure text file management with encrypted sharding using Shamir's Secret Sharing"
+version = "0.2.0"
+description = "Secure text file management with encrypted sharding using Shamir's Secret Sharing across local and cloud storage"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -20,6 +20,9 @@ keywords = [
     "file-management",
     "chacha20",
     "shamir",
+    "aws",
+    "s3",
+    "cloud-storage",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -40,11 +43,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+aws = [
+    "boto3>=1.34.0",
+    "boto3-stubs[s3,sts]>=1.34.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
     "mypy>=1.8.0",
     "ruff>=0.3.0",
+    "moto[s3]>=5.0.0",
+]
+all = [
+    "text-file-manager[aws,dev]",
 ]
 
 [project.urls]
@@ -92,6 +103,14 @@ strict_optional = true
 
 [[tool.mypy.overrides]]
 module = "sslib.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "boto3.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "botocore.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
