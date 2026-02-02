@@ -94,10 +94,135 @@ client = SecureShardingClient.create_hybrid(
 - **ChaCha20-Poly1305**: Modern authenticated encryption (AEAD)
 - **PBKDF2-HMAC-SHA256**: 600,000 iterations (OWASP 2023 recommendation)
 - **Cross-Account Storage**: Distribute across multiple AWS accounts
+- **Per-Location Passwords**: Different encryption passwords for local/AWS-1/AWS-2
+- **Encrypted Credential Storage**: AWS credentials encrypted at rest
 - **Unique Cryptographic Material**: Each shard uses unique salt and nonce
 - **Integrity Verification**: SHA-256 hash verification on reconstruction
 - **Secure Deletion**: Random data overwriting before file deletion
 - **Restrictive Permissions**: Files (0o600), directories (0o700)
+
+## Password Configuration
+
+The library supports flexible password configuration for maximum security:
+
+### Single Password (Same for All)
+
+```python
+from src import SecureShardingClient, PasswordConfig
+
+passwords = PasswordConfig.single("my-secure-password-12chars")
+
+client = SecureShardingClient.create_hybrid(
+    local_directories=['/secure/drive1', '/secure/drive2'],
+    aws_account1_config={'bucket': 'bucket1', 'region': 'us-east-1'},
+    aws_account2_config={'bucket': 'bucket2', 'region': 'us-west-2'},
+    passwords=passwords,
+)
+```
+
+### Separate Passwords (Different for Each Location)
+
+```python
+from src import SecureShardingClient, PasswordConfig
+
+passwords = PasswordConfig.separate(
+    local="local-password-12",      # Encrypts local shards
+    aws_account1="aws1-password-12", # Encrypts AWS-1 shards and credentials
+    aws_account2="aws2-password-12", # Encrypts AWS-2 shards and credentials
+)
+
+client = SecureShardingClient.create_hybrid(
+    local_directories=['/secure/drive1', '/secure/drive2'],
+    aws_account1_config={'bucket': 'bucket1', 'region': 'us-east-1'},
+    aws_account2_config={'bucket': 'bucket2', 'region': 'us-west-2'},
+    passwords=passwords,
+)
+```
+
+### Prefix + Suffix Pattern
+
+For memorable but unique passwords:
+
+```python
+from src import SecureShardingClient, PasswordConfig
+
+passwords = PasswordConfig.prefix_suffix(
+    prefix="company-secret-",    # Common prefix
+    local_suffix="local-2024",   # Final: "company-secret-local-2024"
+    aws1_suffix="aws1-primary",  # Final: "company-secret-aws1-primary"
+    aws2_suffix="aws2-backup",   # Final: "company-secret-aws2-backup"
+)
+```
+
+## Encrypted AWS Credentials
+
+Store AWS credentials encrypted with passwords instead of plaintext:
+
+```python
+from src import SecureShardingClient, PasswordConfig, AWSCredentials
+
+# Define credentials
+aws1_creds = AWSCredentials(
+    access_key_id='AKIA...',
+    secret_access_key='secret...',
+    region='us-east-1',
+)
+aws2_creds = AWSCredentials(
+    access_key_id='AKIA...',
+    secret_access_key='secret...',
+    region='us-west-2',
+)
+
+# Configure passwords
+passwords = PasswordConfig.separate(
+    local="local-password-12",
+    aws_account1="aws1-password-12",
+    aws_account2="aws2-password-12",
+)
+
+# Create client with encrypted credential storage
+client = SecureShardingClient.create_hybrid(
+    local_directories=['/secure/drive1', '/secure/drive2'],
+    aws_account1_config={'bucket': 'bucket1', 'region': 'us-east-1'},
+    aws_account2_config={'bucket': 'bucket2', 'region': 'us-west-2'},
+    aws_account1_credentials=aws1_creds,
+    aws_account2_credentials=aws2_creds,
+    passwords=passwords,
+    credential_store_path='/secure/credentials',  # Encrypted credentials stored here
+)
+
+# Store data - each location uses its own password
+client.store('my-secret', b'sensitive data', passwords)
+
+# Later, load client using stored encrypted credentials
+client = SecureShardingClient.load_with_credentials(
+    credential_store_path='/secure/credentials',
+    passwords=passwords,
+    local_directories=['/secure/drive1', '/secure/drive2'],
+    aws_account1_config={'bucket': 'bucket1', 'region': 'us-east-1'},
+    aws_account2_config={'bucket': 'bucket2', 'region': 'us-west-2'},
+)
+```
+
+### Direct Credential Store Usage
+
+```python
+from src import CredentialStore, AWSCredentials
+
+# Create credential store
+store = CredentialStore('/secure/credentials')
+
+# Store encrypted credentials
+store.store_credentials(
+    'aws_account1',
+    AWSCredentials('AKIA...', 'secret...'),
+    'encryption-password',
+)
+
+# Load credentials later
+creds = store.load_credentials('aws_account1', 'encryption-password')
+print(creds.access_key_id)  # AKIA...
+```
 
 ## Installation
 

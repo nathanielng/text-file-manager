@@ -9,6 +9,11 @@ This module provides a client that supports multiple storage modes:
 The hybrid mode is designed such that:
 - Data cannot be accessed if only one storage mode is compromised
 - Data can still be recovered even if one storage mode is completely lost
+
+Supports per-location passwords:
+- Local shards encrypted with local password
+- AWS-1 shards encrypted with AWS-1 password (also encrypts credentials)
+- AWS-2 shards encrypted with AWS-2 password (also encrypts credentials)
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import logging
 import secrets
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives import hashes
@@ -28,6 +34,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from sslib import shamir
 
 from src.backends import LocalStorageBackend, S3StorageBackend, StorageBackend, StorageType
+from src.credentials import AWSCredentials, CredentialStore
 from src.exceptions import (
     ConfigurationError,
     DecryptionError,
@@ -37,6 +44,7 @@ from src.exceptions import (
     StorageError,
     ThresholdError,
 )
+from src.passwords import PasswordConfig, StoragePasswords
 
 if TYPE_CHECKING:
     from typing import Any
@@ -211,12 +219,18 @@ class DeletionResult:
 
 class SecureShardingClient:
     """
-    Multi-backend secure sharding client.
+    Multi-backend secure sharding client with per-location passwords.
 
     Supports three storage modes:
     - LOCAL: All shards stored locally in multiple directories
     - CLOUD: All shards stored in AWS S3 across 2 accounts
     - HYBRID: Shards distributed between local and cloud storage
+
+    Password Configuration:
+    - Each storage location (local, AWS-1, AWS-2) can have its own password
+    - Local shards are encrypted with the local password
+    - AWS credentials are encrypted with their respective passwords
+    - AWS shards are encrypted with their respective passwords
 
     The HYBRID mode ensures:
     1. No single storage type has enough shards to reconstruct data
@@ -231,13 +245,21 @@ class SecureShardingClient:
         - Salt/Nonce: Unique per shard
 
     Example:
-        >>> # Hybrid mode: local + 2 AWS accounts
+        >>> # Hybrid mode with separate passwords
+        >>> passwords = PasswordConfig.separate(
+        ...     local="local-password-12",
+        ...     aws_account1="aws1-password-12",
+        ...     aws_account2="aws2-password-12",
+        ... )
         >>> client = SecureShardingClient.create_hybrid(
         ...     local_directories=['/secure/drive1', '/secure/drive2'],
-        ...     aws_account1_config={'bucket': 'shards-account1', 'region': 'us-east-1'},
-        ...     aws_account2_config={'bucket': 'shards-account2', 'region': 'us-west-2'},
+        ...     aws_account1_config={'bucket': 'shards-1', 'region': 'us-east-1'},
+        ...     aws_account2_config={'bucket': 'shards-2', 'region': 'us-west-2'},
+        ...     aws_account1_credentials=AWSCredentials('AKIA...', 'secret...'),
+        ...     aws_account2_credentials=AWSCredentials('AKIA...', 'secret...'),
+        ...     passwords=passwords,
+        ...     credential_store_path='/secure/credentials',
         ... )
-        >>> client.store('my-secret', b'sensitive data', 'strong-password-12')
     """
 
     # Security parameters (OWASP 2023 recommendations)
@@ -246,13 +268,15 @@ class SecureShardingClient:
     NONCE_SIZE: int = 12  # 96 bits for ChaCha20Poly1305
     KEY_SIZE: int = 32  # 256 bits
     MIN_PASSWORD_LENGTH: int = 12
-    SHARD_FORMAT_VERSION: str = "2.0"
+    SHARD_FORMAT_VERSION: str = "2.1"
 
     def __init__(
         self,
         backends: list[StorageBackend],
         storage_mode: StorageMode,
         distribution: ShardDistribution,
+        passwords: StoragePasswords | None = None,
+        backend_password_map: dict[int, str] | None = None,
     ) -> None:
         """
         Initialize the sharding client with storage backends.
@@ -264,10 +288,14 @@ class SecureShardingClient:
             backends: List of storage backends (local and/or S3).
             storage_mode: The storage mode being used.
             distribution: How shards should be distributed across backends.
+            passwords: Password configuration for each storage location.
+            backend_password_map: Mapping of backend index to password.
         """
         self.backends = backends
         self.storage_mode = storage_mode
         self.distribution = distribution
+        self._passwords = passwords
+        self._backend_password_map = backend_password_map or {}
 
         # Organize backends by type
         self.local_backends = [b for b in backends if b.storage_type == StorageType.LOCAL]
@@ -278,11 +306,18 @@ class SecureShardingClient:
             f"backends={len(backends)}, threshold={distribution.threshold}"
         )
 
+    def _get_password_for_backend(self, backend_index: int, default_password: str) -> str:
+        """Get the appropriate password for a backend index."""
+        if backend_index in self._backend_password_map:
+            return self._backend_password_map[backend_index]
+        return default_password
+
     @classmethod
     def create_local(
         cls,
         directories: list[str],
         threshold: int = 3,
+        password: str | None = None,
     ) -> SecureShardingClient:
         """
         Create a client for 100% local storage.
@@ -290,6 +325,8 @@ class SecureShardingClient:
         Args:
             directories: List of local directory paths for shard storage.
             threshold: Minimum shards needed to reconstruct data.
+            password: Optional password for local encryption (can also be
+                      provided at store/retrieve time).
 
         Returns:
             Configured SecureShardingClient for local storage.
@@ -299,10 +336,21 @@ class SecureShardingClient:
                 f"Need at least {threshold} directories for threshold {threshold}"
             )
 
-        backends = [LocalStorageBackend(d) for d in directories]
+        backends: list[StorageBackend] = [LocalStorageBackend(d) for d in directories]
         distribution = ShardDistribution.for_local_mode(len(directories), threshold)
 
-        return cls(backends, StorageMode.LOCAL, distribution)
+        # Build password map if password provided
+        backend_password_map: dict[int, str] = {}
+        if password:
+            for i in range(len(backends)):
+                backend_password_map[i] = password
+
+        return cls(
+            backends,
+            StorageMode.LOCAL,
+            distribution,
+            backend_password_map=backend_password_map,
+        )
 
     @classmethod
     def create_cloud(
@@ -312,6 +360,10 @@ class SecureShardingClient:
         threshold: int = 3,
         account1_shards: int = 3,
         account2_shards: int = 2,
+        aws_account1_credentials: AWSCredentials | None = None,
+        aws_account2_credentials: AWSCredentials | None = None,
+        passwords: PasswordConfig | None = None,
+        credential_store_path: str | Path | None = None,
     ) -> SecureShardingClient:
         """
         Create a client for 100% cloud storage across 2 AWS accounts.
@@ -324,11 +376,46 @@ class SecureShardingClient:
             threshold: Minimum shards needed to reconstruct data.
             account1_shards: Number of shards in first account.
             account2_shards: Number of shards in second account.
+            aws_account1_credentials: AWS credentials for account 1.
+            aws_account2_credentials: AWS credentials for account 2.
+            passwords: Password configuration for each account.
+            credential_store_path: Path to store encrypted credentials.
 
         Returns:
             Configured SecureShardingClient for cloud storage.
         """
         backends: list[StorageBackend] = []
+        backend_password_map: dict[int, str] = {}
+        storage_passwords: StoragePasswords | None = None
+
+        # Get passwords if provided
+        if passwords:
+            storage_passwords = passwords.get_passwords()
+
+        # Store encrypted credentials if provided
+        if credential_store_path and storage_passwords:
+            cred_store = CredentialStore(credential_store_path)
+
+            if aws_account1_credentials:
+                cred_store.store_credentials(
+                    "aws_account1",
+                    aws_account1_credentials,
+                    storage_passwords.aws_account1,
+                )
+                # Add credentials to config
+                aws_account1_config = dict(aws_account1_config)
+                boto_config = aws_account1_credentials.to_boto3_config()
+                aws_account1_config.update(boto_config)
+
+            if aws_account2_credentials:
+                cred_store.store_credentials(
+                    "aws_account2",
+                    aws_account2_credentials,
+                    storage_passwords.aws_account2,
+                )
+                aws_account2_config = dict(aws_account2_config)
+                boto_config = aws_account2_credentials.to_boto3_config()
+                aws_account2_config.update(boto_config)
 
         # Create backends for account 1
         for i in range(account1_shards):
@@ -336,6 +423,8 @@ class SecureShardingClient:
             config.setdefault("prefix", f"shards/replica{i}/")
             config["account_id"] = config.get("account_id", "account1")
             backends.append(S3StorageBackend(**config))
+            if storage_passwords:
+                backend_password_map[i] = storage_passwords.aws_account1
 
         # Create backends for account 2
         for i in range(account2_shards):
@@ -343,12 +432,20 @@ class SecureShardingClient:
             config.setdefault("prefix", f"shards/replica{i}/")
             config["account_id"] = config.get("account_id", "account2")
             backends.append(S3StorageBackend(**config))
+            if storage_passwords:
+                backend_password_map[account1_shards + i] = storage_passwords.aws_account2
 
         distribution = ShardDistribution.for_cloud_mode(
             threshold, account1_shards, account2_shards
         )
 
-        return cls(backends, StorageMode.CLOUD, distribution)
+        return cls(
+            backends,
+            StorageMode.CLOUD,
+            distribution,
+            passwords=storage_passwords,
+            backend_password_map=backend_password_map,
+        )
 
     @classmethod
     def create_hybrid(
@@ -359,15 +456,24 @@ class SecureShardingClient:
         local_shards: int | None = None,
         account1_shards: int | None = None,
         account2_shards: int | None = None,
+        aws_account1_credentials: AWSCredentials | None = None,
+        aws_account2_credentials: AWSCredentials | None = None,
+        passwords: PasswordConfig | None = None,
+        credential_store_path: str | Path | None = None,
     ) -> SecureShardingClient:
         """
-        Create a client for hybrid local + cloud storage.
+        Create a client for hybrid local + cloud storage with per-location passwords.
 
         This mode ensures:
         - Local alone cannot reconstruct data
         - Single AWS account alone cannot reconstruct data
         - Local + any one AWS account CAN reconstruct data
         - Both AWS accounts together CAN reconstruct data (if local is lost)
+
+        Password Security:
+        - Local shards encrypted with local password
+        - AWS-1 credentials and shards encrypted with AWS-1 password
+        - AWS-2 credentials and shards encrypted with AWS-2 password
 
         Args:
             local_directories: List of local directory paths.
@@ -376,9 +482,32 @@ class SecureShardingClient:
             local_shards: Number of local shards (default: len(directories)).
             account1_shards: Number of shards in first AWS account (default: 2).
             account2_shards: Number of shards in second AWS account (default: 2).
+            aws_account1_credentials: AWS credentials for account 1.
+            aws_account2_credentials: AWS credentials for account 2.
+            passwords: Password configuration (single, separate, or prefix_suffix).
+            credential_store_path: Path to store encrypted AWS credentials.
 
         Returns:
             Configured SecureShardingClient for hybrid storage.
+
+        Example:
+            >>> # Same password for all
+            >>> passwords = PasswordConfig.single("my-password-12chars")
+
+            >>> # Different passwords
+            >>> passwords = PasswordConfig.separate(
+            ...     local="local-pwd-12345",
+            ...     aws_account1="aws1-pwd-12345",
+            ...     aws_account2="aws2-pwd-12345",
+            ... )
+
+            >>> # Prefix + suffix
+            >>> passwords = PasswordConfig.prefix_suffix(
+            ...     prefix="common-prefix-",
+            ...     local_suffix="local-123",
+            ...     aws1_suffix="aws1-456",
+            ...     aws2_suffix="aws2-789",
+            ... )
         """
         local_shards = local_shards or len(local_directories)
         account1_shards = account1_shards or 2
@@ -391,10 +520,44 @@ class SecureShardingClient:
             )
 
         backends: list[StorageBackend] = []
+        backend_password_map: dict[int, str] = {}
+        storage_passwords: StoragePasswords | None = None
+
+        # Get passwords if provided
+        if passwords:
+            storage_passwords = passwords.get_passwords()
+
+        # Store encrypted credentials if provided
+        if credential_store_path and storage_passwords:
+            cred_store = CredentialStore(credential_store_path)
+
+            if aws_account1_credentials:
+                cred_store.store_credentials(
+                    "aws_account1",
+                    aws_account1_credentials,
+                    storage_passwords.aws_account1,
+                )
+                aws_account1_config = dict(aws_account1_config)
+                boto_config = aws_account1_credentials.to_boto3_config()
+                aws_account1_config.update(boto_config)
+
+            if aws_account2_credentials:
+                cred_store.store_credentials(
+                    "aws_account2",
+                    aws_account2_credentials,
+                    storage_passwords.aws_account2,
+                )
+                aws_account2_config = dict(aws_account2_config)
+                boto_config = aws_account2_credentials.to_boto3_config()
+                aws_account2_config.update(boto_config)
 
         # Create local backends
+        backend_idx = 0
         for i in range(local_shards):
             backends.append(LocalStorageBackend(local_directories[i]))
+            if storage_passwords:
+                backend_password_map[backend_idx] = storage_passwords.local
+            backend_idx += 1
 
         # Create S3 backends for account 1
         for i in range(account1_shards):
@@ -402,6 +565,9 @@ class SecureShardingClient:
             config.setdefault("prefix", f"shards/replica{i}/")
             config["account_id"] = config.get("account_id", "account1")
             backends.append(S3StorageBackend(**config))
+            if storage_passwords:
+                backend_password_map[backend_idx] = storage_passwords.aws_account1
+            backend_idx += 1
 
         # Create S3 backends for account 2
         for i in range(account2_shards):
@@ -409,12 +575,102 @@ class SecureShardingClient:
             config.setdefault("prefix", f"shards/replica{i}/")
             config["account_id"] = config.get("account_id", "account2")
             backends.append(S3StorageBackend(**config))
+            if storage_passwords:
+                backend_password_map[backend_idx] = storage_passwords.aws_account2
+            backend_idx += 1
 
         distribution = ShardDistribution.for_hybrid_mode(
             local_shards, account1_shards, account2_shards
         )
 
-        return cls(backends, StorageMode.HYBRID, distribution)
+        return cls(
+            backends,
+            StorageMode.HYBRID,
+            distribution,
+            passwords=storage_passwords,
+            backend_password_map=backend_password_map,
+        )
+
+    @classmethod
+    def load_with_credentials(
+        cls,
+        credential_store_path: str | Path,
+        passwords: PasswordConfig,
+        local_directories: list[str] | None = None,
+        aws_account1_config: dict[str, Any] | None = None,
+        aws_account2_config: dict[str, Any] | None = None,
+        storage_mode: StorageMode = StorageMode.HYBRID,
+        local_shards: int | None = None,
+        account1_shards: int | None = None,
+        account2_shards: int | None = None,
+    ) -> SecureShardingClient:
+        """
+        Load a client using previously stored encrypted credentials.
+
+        This is useful for resuming operations where credentials were
+        previously stored using create_hybrid or create_cloud.
+
+        Args:
+            credential_store_path: Path where encrypted credentials are stored.
+            passwords: Passwords for decrypting credentials and shards.
+            local_directories: Local directories (for hybrid mode).
+            aws_account1_config: Base config for AWS account 1 (bucket, region).
+            aws_account2_config: Base config for AWS account 2 (bucket, region).
+            storage_mode: Storage mode to use.
+            local_shards: Number of local shards.
+            account1_shards: Number of AWS account 1 shards.
+            account2_shards: Number of AWS account 2 shards.
+
+        Returns:
+            Configured SecureShardingClient with loaded credentials.
+        """
+        storage_passwords = passwords.get_passwords()
+        cred_store = CredentialStore(credential_store_path)
+
+        # Load and decrypt AWS credentials
+        if cred_store.has_credentials("aws_account1") and aws_account1_config:
+            creds1 = cred_store.load_credentials("aws_account1", storage_passwords.aws_account1)
+            aws_account1_config = dict(aws_account1_config)
+            aws_account1_config.update(creds1.to_boto3_config())
+
+        if cred_store.has_credentials("aws_account2") and aws_account2_config:
+            creds2 = cred_store.load_credentials("aws_account2", storage_passwords.aws_account2)
+            aws_account2_config = dict(aws_account2_config)
+            aws_account2_config.update(creds2.to_boto3_config())
+
+        # Create client based on storage mode
+        if storage_mode == StorageMode.LOCAL:
+            if not local_directories:
+                raise ConfigurationError("local_directories required for LOCAL mode")
+            return cls.create_local(
+                directories=local_directories,
+                threshold=local_shards or 3,
+                password=storage_passwords.local,
+            )
+        elif storage_mode == StorageMode.CLOUD:
+            if not aws_account1_config or not aws_account2_config:
+                raise ConfigurationError("AWS configs required for CLOUD mode")
+            return cls.create_cloud(
+                aws_account1_config=aws_account1_config,
+                aws_account2_config=aws_account2_config,
+                account1_shards=account1_shards or 3,
+                account2_shards=account2_shards or 2,
+                passwords=passwords,
+            )
+        else:  # HYBRID
+            if not local_directories or not aws_account1_config or not aws_account2_config:
+                raise ConfigurationError(
+                    "local_directories and AWS configs required for HYBRID mode"
+                )
+            return cls.create_hybrid(
+                local_directories=local_directories,
+                aws_account1_config=aws_account1_config,
+                aws_account2_config=aws_account2_config,
+                local_shards=local_shards,
+                account1_shards=account1_shards,
+                account2_shards=account2_shards,
+                passwords=passwords,
+            )
 
     def _derive_key(self, password: str, salt: bytes) -> bytes:
         """Derive encryption key from password using PBKDF2-HMAC-SHA256."""
@@ -453,16 +709,23 @@ class SecureShardingClient:
         self,
         key: str,
         data: bytes,
-        password: str,
+        password: str | PasswordConfig | None = None,
         metadata: dict[str, str] | None = None,
     ) -> ShardResult:
         """
         Split data into encrypted shards and store according to storage mode.
 
+        Each shard is encrypted with its location-specific password if
+        per-location passwords were configured, otherwise uses the provided
+        password for all shards.
+
         Args:
             key: Unique identifier for the sharded data.
             data: Raw bytes to shard and store.
-            password: Password for encrypting shards (min 12 characters).
+            password: Password for encrypting shards. Can be:
+                      - str: Single password for all shards
+                      - PasswordConfig: Per-location passwords
+                      - None: Use passwords from client configuration
             metadata: Optional metadata stored with shards (unencrypted).
 
         Returns:
@@ -471,13 +734,44 @@ class SecureShardingClient:
         Raises:
             TypeError: If data is not bytes.
             PasswordTooShortError: If password < 12 characters.
+            ConfigurationError: If no password provided and none configured.
             InsufficientShardsError: If not enough shards could be stored.
         """
         if not isinstance(data, bytes):
             raise TypeError("Data must be bytes")
 
-        if not password or len(password) < self.MIN_PASSWORD_LENGTH:
-            raise PasswordTooShortError(self.MIN_PASSWORD_LENGTH)
+        # Resolve passwords
+        if isinstance(password, PasswordConfig):
+            passwords = password.get_passwords()
+        elif isinstance(password, str):
+            if len(password) < self.MIN_PASSWORD_LENGTH:
+                raise PasswordTooShortError(self.MIN_PASSWORD_LENGTH)
+            # Use same password for all
+            passwords = None
+            default_password = password
+        elif self._passwords:
+            passwords = self._passwords
+        else:
+            raise ConfigurationError(
+                "No password provided. Provide password parameter or configure "
+                "passwords when creating the client."
+            )
+
+        # Update backend password map if using PasswordConfig
+        if passwords:
+            default_password = passwords.local  # Fallback
+            # Rebuild password map
+            self._backend_password_map = {}
+            idx = 0
+            for _ in range(self.distribution.local_shards):
+                self._backend_password_map[idx] = passwords.local
+                idx += 1
+            for _ in range(self.distribution.cloud_account1_shards):
+                self._backend_password_map[idx] = passwords.aws_account1
+                idx += 1
+            for _ in range(self.distribution.cloud_account2_shards):
+                self._backend_password_map[idx] = passwords.aws_account2
+                idx += 1
 
         dist = self.distribution
         logger.info(
@@ -505,6 +799,7 @@ class SecureShardingClient:
             "local-shards": str(dist.local_shards),
             "cloud-account1-shards": str(dist.cloud_account1_shards),
             "cloud-account2-shards": str(dist.cloud_account2_shards),
+            "per-location-passwords": str(passwords is not None),
         })
 
         # Store each shard in its designated backend
@@ -512,11 +807,12 @@ class SecureShardingClient:
 
         for i, share in enumerate(shares):
             backend = self.backends[i]
+            shard_password = self._get_password_for_backend(i, default_password)
 
             try:
-                # Encrypt the shard
+                # Encrypt the shard with location-specific password
                 share_bytes = share.encode("utf-8")
-                salt, nonce, ciphertext = self._encrypt_shard(share_bytes, password)
+                salt, nonce, ciphertext = self._encrypt_shard(share_bytes, shard_password)
 
                 # Create shard file structure
                 shard_data = {
@@ -564,18 +860,22 @@ class SecureShardingClient:
     def retrieve(
         self,
         key: str,
-        password: str,
+        password: str | PasswordConfig | None = None,
         verify_integrity: bool = True,
     ) -> bytes:
         """
         Retrieve and reconstruct data from encrypted shards.
 
         Will attempt to read from all available backends and reconstruct
-        once the threshold is reached.
+        once the threshold is reached. Uses location-specific passwords
+        for decryption if configured.
 
         Args:
             key: Original file key used during storage.
-            password: Password for decrypting shards.
+            password: Password for decrypting shards. Can be:
+                      - str: Single password for all shards
+                      - PasswordConfig: Per-location passwords
+                      - None: Use passwords from client configuration
             verify_integrity: Whether to verify SHA-256 hash.
 
         Returns:
@@ -585,7 +885,37 @@ class SecureShardingClient:
             DecryptionError: If decryption fails.
             InsufficientShardsError: If not enough shards available.
             IntegrityError: If integrity verification fails.
+            ConfigurationError: If no password provided and none configured.
         """
+        # Resolve passwords
+        if isinstance(password, PasswordConfig):
+            passwords = password.get_passwords()
+        elif isinstance(password, str):
+            passwords = None
+            default_password = password
+        elif self._passwords:
+            passwords = self._passwords
+        else:
+            raise ConfigurationError(
+                "No password provided. Provide password parameter or configure "
+                "passwords when creating the client."
+            )
+
+        # Update backend password map if using PasswordConfig
+        if passwords:
+            default_password = passwords.local  # Fallback
+            self._backend_password_map = {}
+            idx = 0
+            for _ in range(self.distribution.local_shards):
+                self._backend_password_map[idx] = passwords.local
+                idx += 1
+            for _ in range(self.distribution.cloud_account1_shards):
+                self._backend_password_map[idx] = passwords.aws_account1
+                idx += 1
+            for _ in range(self.distribution.cloud_account2_shards):
+                self._backend_password_map[idx] = passwords.aws_account2
+                idx += 1
+
         logger.info(f"Retrieving '{key}' (mode: {self.storage_mode.value})")
 
         shares: list[str] = []
@@ -597,6 +927,8 @@ class SecureShardingClient:
             # Stop early if we have enough
             if detected_threshold and len(shares) >= detected_threshold:
                 break
+
+            shard_password = self._get_password_for_backend(i, default_password)
 
             try:
                 shard_data_str = backend.read_shard(key, i)
@@ -610,9 +942,9 @@ class SecureShardingClient:
                 nonce = base64.b64decode(shard_data["nonce"])
                 ciphertext = base64.b64decode(shard_data["ciphertext"])
 
-                # Decrypt
+                # Decrypt with location-specific password
                 try:
-                    decrypted = self._decrypt_shard(salt, nonce, ciphertext, password)
+                    decrypted = self._decrypt_shard(salt, nonce, ciphertext, shard_password)
                     share = decrypted.decode("utf-8")
                     shares.append(share)
                     shard_indices.append(i)
@@ -714,8 +1046,8 @@ class SecureShardingClient:
 
         for backend in self.backends:
             try:
-                for key, _ in backend.list_shards():
-                    keys.add(key)
+                for shard_key, _ in backend.list_shards():
+                    keys.add(shard_key)
             except Exception as e:
                 logger.warning(f"Failed to list shards from {backend.location}: {e}")
 
