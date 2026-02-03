@@ -66,9 +66,10 @@ Issues = "https://github.com/example/text-file-manager/issues"
 
 [project.scripts]
 text-file-manager = "src.shard_manager:main"
+text-file-manager-ui = "frontends.textui.app:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src", "frontends"]
 
 [tool.ruff]
 target-version = "py310"

@@ -504,12 +504,99 @@ export AWS_PROFILE_ACCOUNT2=backup-account
 }
 ```
 
+## Project Structure
+
+```
+text-file-manager/
+├── src/                          # Backend library
+│   ├── __init__.py              # Public exports
+│   ├── client.py                # Main SecureShardingClient
+│   ├── shard_manager.py         # Legacy client for compatibility
+│   ├── passwords.py             # Password configuration
+│   ├── credentials.py           # AWS credential encryption
+│   ├── exceptions.py            # Custom exceptions
+│   └── backends/                # Storage backends
+│       ├── base.py              # Abstract base class
+│       ├── local.py             # Local filesystem
+│       └── s3.py                # AWS S3
+├── frontends/                    # Frontend applications
+│   └── textui/                  # Text-based UI
+│       ├── __init__.py
+│       ├── __main__.py          # Module entry point
+│       └── app.py               # Interactive CLI
+├── tests/                        # Test suite
+│   ├── conftest.py              # Shared fixtures
+│   ├── backend/                 # Backend tests
+│   │   ├── test_client.py
+│   │   ├── test_credentials.py
+│   │   ├── test_local_backend.py
+│   │   └── test_passwords.py
+│   └── frontends/               # Frontend tests
+│       └── test_textui.py
+├── docs/                         # Documentation
+│   └── BACKEND_API.md           # API specification for frontends
+├── pyproject.toml               # Project configuration
+└── README.md                    # This file
+```
+
+## Text UI Frontend
+
+A text-based interactive CLI for managing encrypted sharded data.
+
+### Running the Text UI
+
+```bash
+# Using the module
+python -m frontends.textui
+
+# Or using the installed entry point
+text-file-manager-ui
+
+# With a configuration file
+python -m frontends.textui --config config.json
+```
+
+### Features
+
+- **Configure Storage**: Set up local, cloud, or hybrid storage modes
+- **Store Data**: Encrypt and shard data from text input or files
+- **Retrieve Data**: Decrypt and reconstruct data with integrity verification
+- **List Keys**: View all stored data keys
+- **Check Status**: See shard availability across backends
+- **Delete Data**: Securely remove sharded data
+- **Manage Credentials**: Store/load encrypted AWS credentials
+
+### Configuration File Format
+
+```json
+{
+  "storage_mode": "hybrid",
+  "local_directories": ["/path/to/dir1", "/path/to/dir2"],
+  "credential_store_path": "/path/to/credentials",
+  "aws_account1": {"bucket": "bucket1", "region": "us-east-1"},
+  "aws_account2": {"bucket": "bucket2", "region": "eu-west-1"},
+  "local_shards": 2,
+  "account1_shards": 2,
+  "account2_shards": 2
+}
+```
+
 ## Development
 
 ### Running Tests
 
 ```bash
+# Run all tests
 pytest
+
+# Run with coverage
+pytest --cov=src --cov=frontends
+
+# Run specific test file
+pytest tests/backend/test_client.py
+
+# Run with verbose output
+pytest -v
 ```
 
 ### Type Checking
@@ -521,8 +608,8 @@ mypy src/
 ### Linting
 
 ```bash
-ruff check src/
-ruff format src/
+ruff check src/ frontends/
+ruff format src/ frontends/
 ```
 
 ## Legacy API
