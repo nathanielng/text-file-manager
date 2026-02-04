@@ -504,6 +504,268 @@ export AWS_PROFILE_ACCOUNT2=backup-account
 }
 ```
 
+### Creating Dedicated IAM Users for AWS-1 and AWS-2
+
+For security best practices, create dedicated IAM users with permissions restricted to only their respective S3 buckets. This ensures:
+- Minimal privilege: Each user can only access their designated bucket
+- Isolation: Compromise of one account's credentials doesn't affect the other
+- Auditability: Clear separation for CloudTrail logging
+
+#### Step 1: Create S3 Buckets
+
+First, create the S3 buckets in each AWS account:
+
+**AWS Account 1 (Primary):**
+```bash
+aws s3 mb s3://your-company-shards-primary --region us-east-1
+```
+
+**AWS Account 2 (Backup):**
+```bash
+aws s3 mb s3://your-company-shards-backup --region eu-west-1
+```
+
+#### Step 2: Create IAM Policy for AWS Account 1
+
+Create a policy file `shard-bucket-policy-aws1.json`:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowShardBucketOperations",
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject",
+                "s3:HeadObject"
+            ],
+            "Resource": "arn:aws:s3:::your-company-shards-primary/*"
+        },
+        {
+            "Sid": "AllowBucketListing",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": "arn:aws:s3:::your-company-shards-primary"
+        }
+    ]
+}
+```
+
+Create the policy in AWS:
+```bash
+aws iam create-policy \
+    --policy-name TextFileManagerShardAccess \
+    --policy-document file://shard-bucket-policy-aws1.json \
+    --description "Allows access to text-file-manager shard bucket"
+```
+
+#### Step 3: Create IAM User for AWS Account 1
+
+```bash
+# Create the user
+aws iam create-user --user-name text-file-manager-aws1
+
+# Attach the policy (replace ACCOUNT_ID with your AWS account ID)
+aws iam attach-user-policy \
+    --user-name text-file-manager-aws1 \
+    --policy-arn arn:aws:iam::ACCOUNT_ID:policy/TextFileManagerShardAccess
+
+# Create access keys
+aws iam create-access-key --user-name text-file-manager-aws1
+```
+
+Save the `AccessKeyId` and `SecretAccessKey` from the output securely.
+
+#### Step 4: Repeat for AWS Account 2
+
+Create policy file `shard-bucket-policy-aws2.json`:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowShardBucketOperations",
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject",
+                "s3:HeadObject"
+            ],
+            "Resource": "arn:aws:s3:::your-company-shards-backup/*"
+        },
+        {
+            "Sid": "AllowBucketListing",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": "arn:aws:s3:::your-company-shards-backup"
+        }
+    ]
+}
+```
+
+Then create user in AWS Account 2:
+```bash
+# Create policy
+aws iam create-policy \
+    --policy-name TextFileManagerShardAccess \
+    --policy-document file://shard-bucket-policy-aws2.json
+
+# Create user
+aws iam create-user --user-name text-file-manager-aws2
+
+# Attach policy
+aws iam attach-user-policy \
+    --user-name text-file-manager-aws2 \
+    --policy-arn arn:aws:iam::ACCOUNT2_ID:policy/TextFileManagerShardAccess
+
+# Create access keys
+aws iam create-access-key --user-name text-file-manager-aws2
+```
+
+#### Step 5: Configure AWS CLI Profiles (Optional)
+
+Add profiles to `~/.aws/credentials`:
+
+```ini
+[text-file-manager-aws1]
+aws_access_key_id = AKIA...from-step-3
+aws_secret_access_key = ...from-step-3
+region = us-east-1
+
+[text-file-manager-aws2]
+aws_access_key_id = AKIA...from-step-4
+aws_secret_access_key = ...from-step-4
+region = eu-west-1
+```
+
+#### Step 6: Use with Text File Manager
+
+**Option A: Using AWS Profiles**
+
+```python
+from src import SecureShardingClient, PasswordConfig
+
+client = SecureShardingClient.create_hybrid(
+    local_directories=['/secure/local1', '/secure/local2'],
+    aws_account1_config={
+        'bucket': 'your-company-shards-primary',
+        'region': 'us-east-1',
+        'profile_name': 'text-file-manager-aws1',
+    },
+    aws_account2_config={
+        'bucket': 'your-company-shards-backup',
+        'region': 'eu-west-1',
+        'profile_name': 'text-file-manager-aws2',
+    },
+    passwords=PasswordConfig.single("my-secure-password-12"),
+)
+```
+
+**Option B: Using Encrypted Credentials (Recommended)**
+
+```python
+from src import SecureShardingClient, PasswordConfig, AWSCredentials
+
+# Configure with encrypted credential storage
+passwords = PasswordConfig.separate(
+    local="local-password-12",
+    aws_account1="aws1-password-123",
+    aws_account2="aws2-password-123",
+)
+
+client = SecureShardingClient.create_hybrid(
+    local_directories=['/secure/local1', '/secure/local2'],
+    aws_account1_config={
+        'bucket': 'your-company-shards-primary',
+        'region': 'us-east-1',
+    },
+    aws_account2_config={
+        'bucket': 'your-company-shards-backup',
+        'region': 'eu-west-1',
+    },
+    aws_account1_credentials=AWSCredentials(
+        access_key_id='AKIA...from-step-3',
+        secret_access_key='...from-step-3',
+        region='us-east-1',
+    ),
+    aws_account2_credentials=AWSCredentials(
+        access_key_id='AKIA...from-step-4',
+        secret_access_key='...from-step-4',
+        region='eu-west-1',
+    ),
+    passwords=passwords,
+    credential_store_path='/secure/credentials',  # Credentials encrypted here
+)
+```
+
+#### Additional Security Recommendations
+
+1. **Enable MFA Delete on S3 Buckets**
+   ```bash
+   aws s3api put-bucket-versioning \
+       --bucket your-company-shards-primary \
+       --versioning-configuration Status=Enabled,MFADelete=Enabled \
+       --mfa "arn:aws:iam::ACCOUNT_ID:mfa/your-device TOTP-CODE"
+   ```
+
+2. **Enable S3 Bucket Versioning**
+   ```bash
+   aws s3api put-bucket-versioning \
+       --bucket your-company-shards-primary \
+       --versioning-configuration Status=Enabled
+   ```
+
+3. **Block Public Access**
+   ```bash
+   aws s3api put-public-access-block \
+       --bucket your-company-shards-primary \
+       --public-access-block-configuration \
+       "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+   ```
+
+4. **Enable Server-Side Encryption by Default**
+   ```bash
+   aws s3api put-bucket-encryption \
+       --bucket your-company-shards-primary \
+       --server-side-encryption-configuration \
+       '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+   ```
+
+5. **Enable CloudTrail Logging**
+   ```bash
+   aws cloudtrail create-trail \
+       --name shard-bucket-trail \
+       --s3-bucket-name your-cloudtrail-logs-bucket \
+       --include-global-service-events
+   ```
+
+6. **Set Bucket Lifecycle for Cost Management** (Optional)
+   ```json
+   {
+       "Rules": [
+           {
+               "ID": "TransitionToIA",
+               "Status": "Enabled",
+               "Filter": {"Prefix": "shards/"},
+               "Transitions": [
+                   {"Days": 90, "StorageClass": "STANDARD_IA"}
+               ]
+           }
+       ]
+   }
+   ```
+
 ## Project Structure
 
 ```
