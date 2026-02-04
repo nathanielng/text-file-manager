@@ -520,10 +520,15 @@ text-file-manager/
 │       ├── local.py             # Local filesystem
 │       └── s3.py                # AWS S3
 ├── frontends/                    # Frontend applications
-│   └── textui/                  # Text-based UI
+│   ├── textui/                  # Text-based UI
+│   │   ├── __init__.py
+│   │   ├── __main__.py          # Module entry point
+│   │   └── app.py               # Interactive CLI
+│   └── restapi/                 # REST API (FastAPI)
 │       ├── __init__.py
 │       ├── __main__.py          # Module entry point
-│       └── app.py               # Interactive CLI
+│       ├── app.py               # FastAPI application
+│       └── models.py            # Pydantic request/response models
 ├── tests/                        # Test suite
 │   ├── conftest.py              # Shared fixtures
 │   ├── backend/                 # Backend tests
@@ -532,7 +537,8 @@ text-file-manager/
 │   │   ├── test_local_backend.py
 │   │   └── test_passwords.py
 │   └── frontends/               # Frontend tests
-│       └── test_textui.py
+│       ├── test_textui.py
+│       └── test_restapi.py
 ├── docs/                         # Documentation
 │   └── BACKEND_API.md           # API specification for frontends
 ├── pyproject.toml               # Project configuration
@@ -579,6 +585,142 @@ python -m frontends.textui --config config.json
   "account1_shards": 2,
   "account2_shards": 2
 }
+```
+
+## REST API Frontend
+
+A FastAPI-based REST API for integrating with other applications.
+
+### Running the REST API
+
+```bash
+# Install API dependencies
+pip install "text-file-manager[api]"
+
+# Using the module
+python -m frontends.restapi
+
+# Or using the installed entry point
+text-file-manager-api
+
+# Using uvicorn directly (for development)
+uvicorn frontends.restapi.app:app --reload
+
+# Using gunicorn (for production)
+gunicorn frontends.restapi.app:app -w 4 -k uvicorn.workers.UvicornWorker
+```
+
+### Environment Variables
+
+```bash
+API_HOST=127.0.0.1  # Default host
+API_PORT=8000       # Default port
+API_RELOAD=false    # Enable auto-reload for development
+```
+
+### API Documentation
+
+Once running, interactive API documentation is available at:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+- OpenAPI JSON: `http://localhost:8000/openapi.json`
+
+### API Endpoints
+
+#### Health & Status
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check and configuration status |
+| GET | `/api/status` | Current configuration status |
+| POST | `/api/reset` | Reset storage configuration |
+
+#### Configuration
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/config/local` | Configure local storage mode |
+| POST | `/api/config/cloud` | Configure cloud storage mode |
+| POST | `/api/config/hybrid` | Configure hybrid storage mode |
+
+#### Data Operations
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/keys` | List all stored keys |
+| POST | `/api/data/{key}` | Store encrypted data |
+| POST | `/api/data/{key}/retrieve` | Retrieve and decrypt data |
+| DELETE | `/api/data/{key}` | Delete stored data |
+| GET | `/api/data/{key}/status` | Get shard status |
+
+#### Credentials
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/credentials` | List stored credential accounts |
+| POST | `/api/credentials` | Store encrypted credentials |
+| POST | `/api/credentials/{account_id}` | Load and verify credentials |
+| DELETE | `/api/credentials/{account_id}` | Delete credentials |
+
+### Example Usage
+
+```bash
+# Configure local storage
+curl -X POST http://localhost:8000/api/config/local \
+  -H "Content-Type: application/json" \
+  -d '{
+    "directories": ["/tmp/shard1", "/tmp/shard2", "/tmp/shard3"],
+    "threshold": 2,
+    "passwords": {
+      "mode": "single",
+      "password": "my-secure-password-12"
+    }
+  }'
+
+# Store data
+curl -X POST http://localhost:8000/api/data/secrets/api-key \
+  -H "Content-Type: application/json" \
+  -d '{
+    "data": "my-secret-api-key-value",
+    "password": "my-secure-password-12"
+  }'
+
+# List keys
+curl http://localhost:8000/api/keys
+
+# Retrieve data
+curl -X POST http://localhost:8000/api/data/secrets/api-key/retrieve \
+  -H "Content-Type: application/json" \
+  -d '{"password": "my-secure-password-12"}'
+
+# Get shard status
+curl http://localhost:8000/api/data/secrets/api-key/status
+
+# Delete data
+curl -X DELETE http://localhost:8000/api/data/secrets/api-key
+```
+
+### Python Client Example
+
+```python
+import httpx
+import base64
+
+# Configure storage
+httpx.post("http://localhost:8000/api/config/local", json={
+    "directories": ["/tmp/s1", "/tmp/s2", "/tmp/s3"],
+    "threshold": 2,
+    "passwords": {"mode": "single", "password": "my-password-12345"}
+})
+
+# Store data
+httpx.post("http://localhost:8000/api/data/my-secret", json={
+    "data": "sensitive information",
+    "password": "my-password-12345"
+})
+
+# Retrieve data
+response = httpx.post("http://localhost:8000/api/data/my-secret/retrieve", json={
+    "password": "my-password-12345"
+})
+data = base64.b64decode(response.json()["data"]).decode("utf-8")
+print(data)  # "sensitive information"
 ```
 
 ## Development

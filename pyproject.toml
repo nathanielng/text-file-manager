@@ -47,15 +47,21 @@ aws = [
     "boto3>=1.34.0",
     "boto3-stubs[s3,sts]>=1.34.0",
 ]
+api = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.5.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
     "mypy>=1.8.0",
     "ruff>=0.3.0",
     "moto[s3]>=5.0.0",
+    "httpx>=0.26.0",  # For FastAPI TestClient
 ]
 all = [
-    "text-file-manager[aws,dev]",
+    "text-file-manager[aws,api,dev]",
 ]
 
 [project.urls]
@@ -67,6 +73,7 @@ Issues = "https://github.com/example/text-file-manager/issues"
 [project.scripts]
 text-file-manager = "src.shard_manager:main"
 text-file-manager-ui = "frontends.textui.app:main"
+text-file-manager-api = "frontends.restapi.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src", "frontends"]

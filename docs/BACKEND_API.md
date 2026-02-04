@@ -775,3 +775,464 @@ data = client.retrieve('production/database-creds', passwords)
 Current API Version: **2.1** (Shard format version in stored files)
 
 Package Version: **0.3.0**
+
+---
+
+## REST API Reference
+
+The REST API frontend provides HTTP access to all backend functionality. See below for endpoint specifications.
+
+### Base URL
+
+Default: `http://localhost:8000`
+
+### Authentication
+
+The REST API does not implement authentication. Deploy behind a reverse proxy with authentication for production use.
+
+### Common Response Format
+
+All responses include a `status` field:
+- Success: `{"status": "ok", ...}`
+- Error: `{"status": "error", "error": "ErrorType", "message": "..."}`
+
+### Endpoints
+
+#### Health & Status
+
+##### `GET /health`
+
+Health check endpoint.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "version": "1.0.0",
+  "configured": true,
+  "storage_mode": "hybrid"
+}
+```
+
+##### `GET /api/status`
+
+Get current configuration status.
+
+**Response:**
+```json
+{
+  "status": "configured",
+  "message": "Storage configured in hybrid mode"
+}
+```
+
+##### `POST /api/reset`
+
+Reset storage configuration.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "message": "Configuration reset successfully"
+}
+```
+
+#### Configuration
+
+##### `POST /api/config/local`
+
+Configure local storage mode.
+
+**Request Body:**
+```json
+{
+  "directories": ["/path/to/shard1", "/path/to/shard2", "/path/to/shard3"],
+  "threshold": 2,
+  "passwords": {
+    "mode": "single",
+    "password": "my-secure-password-12"
+  }
+}
+```
+
+**Response (201 Created):**
+```json
+{
+  "status": "ok",
+  "storage_mode": "local",
+  "total_shards": 3,
+  "threshold": 2,
+  "local_shards": 3,
+  "cloud_account1_shards": 0,
+  "cloud_account2_shards": 0
+}
+```
+
+##### `POST /api/config/cloud`
+
+Configure cloud storage mode.
+
+**Request Body:**
+```json
+{
+  "aws_account1": {
+    "bucket": "my-bucket-1",
+    "region": "us-east-1",
+    "prefix": "shards/"
+  },
+  "aws_account2": {
+    "bucket": "my-bucket-2",
+    "region": "eu-west-1"
+  },
+  "threshold": 3,
+  "account1_shards": 3,
+  "account2_shards": 2,
+  "aws_account1_credentials": {
+    "access_key_id": "AKIA...",
+    "secret_access_key": "...",
+    "region": "us-east-1"
+  },
+  "aws_account2_credentials": {
+    "access_key_id": "AKIA...",
+    "secret_access_key": "..."
+  },
+  "passwords": {
+    "mode": "separate",
+    "local_password": "local-pwd-12345",
+    "aws1_password": "aws1-pwd-123456",
+    "aws2_password": "aws2-pwd-123456"
+  },
+  "credential_store_path": "/path/to/credentials"
+}
+```
+
+##### `POST /api/config/hybrid`
+
+Configure hybrid storage mode.
+
+**Request Body:**
+```json
+{
+  "local_directories": ["/path/to/local1", "/path/to/local2"],
+  "aws_account1": {
+    "bucket": "my-bucket-1",
+    "region": "us-east-1"
+  },
+  "aws_account2": {
+    "bucket": "my-bucket-2",
+    "region": "eu-west-1"
+  },
+  "local_shards": 2,
+  "account1_shards": 2,
+  "account2_shards": 2,
+  "passwords": {
+    "mode": "prefix_suffix",
+    "prefix": "company-2024-",
+    "local_suffix": "local-xyz",
+    "aws1_suffix": "aws1-abc123",
+    "aws2_suffix": "aws2-def456"
+  }
+}
+```
+
+#### Data Operations
+
+##### `GET /api/keys`
+
+List all stored keys.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "keys": ["secrets/api-key", "config/database"],
+  "count": 2
+}
+```
+
+##### `POST /api/data/{key}`
+
+Store encrypted data.
+
+**Path Parameters:**
+- `key`: Storage key (supports path segments like `secrets/api-key`)
+
+**Request Body:**
+```json
+{
+  "data": "my-secret-data",
+  "password": "my-secure-password-12",
+  "metadata": {
+    "environment": "production"
+  },
+  "is_base64": false
+}
+```
+
+For binary data, set `is_base64: true` and provide base64-encoded data.
+
+**Response (201 Created):**
+```json
+{
+  "status": "ok",
+  "key": "secrets/api-key",
+  "threshold": 2,
+  "total_shares": 3,
+  "stored_shards": 3,
+  "data_hash": "a1b2c3d4...",
+  "storage_mode": "local"
+}
+```
+
+##### `POST /api/data/{key}/retrieve`
+
+Retrieve and decrypt data.
+
+**Request Body:**
+```json
+{
+  "password": "my-secure-password-12",
+  "verify_integrity": true
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "key": "secrets/api-key",
+  "data": "bXktc2VjcmV0LWRhdGE=",
+  "size": 14,
+  "integrity_verified": true
+}
+```
+
+Note: `data` is always base64-encoded.
+
+##### `DELETE /api/data/{key}`
+
+Delete stored data.
+
+**Request Body (optional):**
+```json
+{
+  "secure": true
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "key": "secrets/api-key",
+  "deleted_count": 3,
+  "failed_count": 0
+}
+```
+
+##### `GET /api/data/{key}/status`
+
+Get shard status.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "key": "secrets/api-key",
+  "threshold": 2,
+  "total_shards": 3,
+  "storage_mode": "local",
+  "can_reconstruct": true,
+  "local_available": 3,
+  "cloud_account1_available": 0,
+  "cloud_account2_available": 0,
+  "shards": [
+    {
+      "index": 0,
+      "backend_type": "local",
+      "location": "/path/to/shard1",
+      "exists": true
+    }
+  ]
+}
+```
+
+#### Credential Management
+
+##### `GET /api/credentials?store_path=/path/to/store`
+
+List stored credential accounts.
+
+**Query Parameters:**
+- `store_path`: Path to credential store (optional if configured)
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "accounts": ["aws_account1", "aws_account2"],
+  "count": 2
+}
+```
+
+##### `POST /api/credentials?store_path=/path/to/store`
+
+Store encrypted credentials.
+
+**Request Body:**
+```json
+{
+  "account_id": "aws_account1",
+  "credentials": {
+    "access_key_id": "AKIA...",
+    "secret_access_key": "...",
+    "region": "us-east-1"
+  },
+  "password": "credential-password-12",
+  "metadata": {
+    "environment": "production"
+  }
+}
+```
+
+**Response (201 Created):**
+```json
+{
+  "status": "ok",
+  "account_id": "aws_account1",
+  "path": "/path/to/store/aws_account1.credentials.enc"
+}
+```
+
+##### `POST /api/credentials/{account_id}?store_path=/path/to/store`
+
+Load and verify credentials (for testing password).
+
+**Request Body:**
+```json
+{
+  "password": "credential-password-12"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "account_id": "aws_account1",
+  "access_key_id_prefix": "AKIA1234...",
+  "region": "us-east-1"
+}
+```
+
+##### `DELETE /api/credentials/{account_id}?store_path=/path/to/store&secure=true`
+
+Delete stored credentials.
+
+**Query Parameters:**
+- `store_path`: Path to credential store
+- `secure`: Secure deletion (default: true)
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "message": "Credentials for aws_account1 deleted"
+}
+```
+
+### Error Responses
+
+#### 400 Bad Request
+
+Invalid request or configuration error.
+
+```json
+{
+  "status": "error",
+  "error": "ConfigurationError",
+  "message": "Password must be at least 12 characters"
+}
+```
+
+#### 401 Unauthorized
+
+Authentication/decryption failed.
+
+```json
+{
+  "status": "error",
+  "error": "DecryptionError",
+  "message": "Decryption failed: wrong password or corrupted data"
+}
+```
+
+#### 404 Not Found
+
+Resource not found.
+
+```json
+{
+  "status": "error",
+  "error": "NotFound",
+  "message": "Credentials not found for account: unknown"
+}
+```
+
+#### 409 Conflict
+
+Storage not configured.
+
+```json
+{
+  "status": "error",
+  "error": "Conflict",
+  "message": "Storage not configured. Call POST /api/config/* first."
+}
+```
+
+#### 422 Unprocessable Entity
+
+Operation cannot be completed (e.g., insufficient shards).
+
+```json
+{
+  "status": "error",
+  "error": "InsufficientShardsError",
+  "message": "Insufficient shards: 1/2 available"
+}
+```
+
+### Password Configuration Modes
+
+The `passwords` object in configuration requests supports three modes:
+
+#### Single Mode
+```json
+{
+  "mode": "single",
+  "password": "same-password-for-all-12"
+}
+```
+
+#### Separate Mode
+```json
+{
+  "mode": "separate",
+  "local_password": "local-password-12",
+  "aws1_password": "aws1-password-123",
+  "aws2_password": "aws2-password-123"
+}
+```
+
+#### Prefix+Suffix Mode
+```json
+{
+  "mode": "prefix_suffix",
+  "prefix": "company-",
+  "local_suffix": "local-2024-abc",
+  "aws1_suffix": "aws1-2024-def",
+  "aws2_suffix": "aws2-2024-ghi"
+}
+```
