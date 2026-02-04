@@ -1,0 +1,4 @@
+# Core dependencies
+cryptography>=42.0.0
+sslib>=0.2.0
+python-dotenv>=1.0.0
